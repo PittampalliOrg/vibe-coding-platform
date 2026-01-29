@@ -73,9 +73,10 @@ function getOpenAIProvider() {
 }
 
 // Model ID to provider native ID mapping
+// Map app model IDs to real Anthropic model IDs
 const ANTHROPIC_MODEL_MAP: Record<string, string> = {
-  [Models.AnthropicClaude4Sonnet]: 'claude-4-sonnet-20250514',
-  [Models.AnthropicClaude45Sonnet]: 'claude-sonnet-4-5-20250514',
+  [Models.AnthropicClaude4Sonnet]: 'claude-sonnet-4-20250514',
+  [Models.AnthropicClaude45Sonnet]: 'claude-sonnet-4-5-20250929',
 }
 
 const OPENAI_MODEL_MAP: Record<string, string> = {

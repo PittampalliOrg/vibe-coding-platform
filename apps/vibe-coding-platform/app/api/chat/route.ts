@@ -20,9 +20,12 @@ interface BodyData {
 }
 
 export async function POST(req: Request) {
-  const checkResult = await checkBotId()
-  if (checkResult.isBot) {
-    return NextResponse.json({ error: `Bot detected` }, { status: 403 })
+  // Skip bot detection for self-hosted deployments (requires Vercel OIDC)
+  if (process.env.VERCEL) {
+    const checkResult = await checkBotId()
+    if (checkResult.isBot) {
+      return NextResponse.json({ error: `Bot detected` }, { status: 403 })
+    }
   }
 
   const [models, { messages, modelId = DEFAULT_MODEL, reasoningEffort }] =

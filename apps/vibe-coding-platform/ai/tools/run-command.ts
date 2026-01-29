@@ -1,6 +1,6 @@
 import type { UIMessageStreamWriter, UIMessage } from 'ai'
 import type { DataPart } from '../messages/data-parts'
-import { Command, Sandbox } from '@vercel/sandbox'
+import { Sandbox, type K8sSandbox, type Command } from '@/lib/k8s-sandbox'
 import { getRichError } from './get-rich-error'
 import { tool } from 'ai'
 import description from './run-command.md'
@@ -16,7 +16,7 @@ export const runCommand = ({ writer }: Params) =>
     inputSchema: z.object({
       sandboxId: z
         .string()
-        .describe('The ID of the Vercel Sandbox to run the command in'),
+        .describe('The ID of the Sandbox to run the command in'),
       command: z
         .string()
         .describe(
@@ -48,7 +48,7 @@ export const runCommand = ({ writer }: Params) =>
         data: { sandboxId, command, args, status: 'executing' },
       })
 
-      let sandbox: Sandbox | null = null
+      let sandbox: K8sSandbox | null = null
 
       try {
         sandbox = await Sandbox.get({ sandboxId })
@@ -164,7 +164,7 @@ export const runCommand = ({ writer }: Params) =>
             commandId: cmd.cmdId,
             command,
             args,
-            exitCode: done.exitCode,
+            exitCode: done.exitCode ?? undefined,
             status: 'done',
           },
         })

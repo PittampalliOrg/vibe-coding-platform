@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server'
-import { Sandbox } from '@vercel/sandbox'
+import { Sandbox } from '@/lib/k8s-sandbox'
 import z from 'zod/v3'
 
 const FileParamsSchema = z.object({
@@ -25,7 +25,7 @@ export async function GET(
   }
 
   const sandbox = await Sandbox.get(fileParams.data)
-  const stream = await sandbox.readFile(fileParams.data)
+  const stream = await sandbox.readFile(fileParams.data.path)
   if (!stream) {
     return NextResponse.json(
       { error: 'File not found in the Sandbox' },

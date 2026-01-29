@@ -1,4 +1,9 @@
-import { type GatewayModelId } from '@ai-sdk/gateway'
+/**
+ * AI Model Constants
+ *
+ * Defines supported models for the vibe-coding-platform.
+ * These model IDs are routed through kgateway to the appropriate backend.
+ */
 
 export enum Models {
   AmazonNovaPro = 'amazon/nova-pro',
@@ -10,9 +15,15 @@ export enum Models {
   XaiGrok3Fast = 'xai/grok-3-fast',
 }
 
-export const DEFAULT_MODEL = Models.OpenAIGPT52
+/**
+ * Default model to use when none is specified
+ */
+export const DEFAULT_MODEL = Models.AnthropicClaude45Sonnet
 
-export const SUPPORTED_MODELS: GatewayModelId[] = [
+/**
+ * List of supported model IDs
+ */
+export const SUPPORTED_MODELS: string[] = [
   Models.OpenAIGPT52,
   Models.AmazonNovaPro,
   Models.AnthropicClaude4Sonnet,
@@ -22,6 +33,9 @@ export const SUPPORTED_MODELS: GatewayModelId[] = [
   Models.XaiGrok3Fast,
 ]
 
+/**
+ * Test prompts for quick-start functionality
+ */
 export const TEST_PROMPTS = [
   'Generate a Next.js app that allows to list and search Pokemons',
   'Create a `golang` server that responds with "Hello World" to any request',

@@ -1,4 +1,4 @@
-import { APIError } from '@vercel/sandbox/dist/api-client/api-error'
+import { SandboxError } from '@/lib/k8s-sandbox'
 
 interface Params {
   args?: Record<string, unknown>
@@ -28,11 +28,11 @@ function getErrorFields(error: unknown) {
       message: String(error),
       json: error,
     }
-  } else if (error instanceof APIError) {
+  } else if (error instanceof SandboxError) {
     return {
       message: error.message,
       json: error.json,
-      text: error.text,
+      text: error.details ? JSON.stringify(error.details) : undefined,
     }
   } else {
     return {

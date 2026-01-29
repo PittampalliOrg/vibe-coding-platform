@@ -1,10 +1,9 @@
-import { APIError } from '@vercel/sandbox/dist/api-client/api-error'
 import { NextRequest, NextResponse } from 'next/server'
-import { Sandbox } from '@vercel/sandbox'
+import { Sandbox, SandboxError } from '@/lib/k8s-sandbox'
 
 /**
- * We must change the SDK to add data to the instance and then
- * use it to retrieve the status of the Sandbox.
+ * Check sandbox status by running an echo command.
+ * Returns the status of the sandbox (running or stopped).
  */
 export async function GET(
   _request: NextRequest,
@@ -20,8 +19,8 @@ export async function GET(
     return NextResponse.json({ status: 'running' })
   } catch (error) {
     if (
-      error instanceof APIError &&
-      error.json.error.code === 'sandbox_stopped'
+      error instanceof SandboxError &&
+      error.code === 'sandbox_stopped'
     ) {
       return NextResponse.json({ status: 'stopped' })
     } else {

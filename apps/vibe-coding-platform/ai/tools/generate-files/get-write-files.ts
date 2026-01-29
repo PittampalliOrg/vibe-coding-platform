@@ -1,11 +1,11 @@
 import type { DataPart } from '../../messages/data-parts'
 import type { File } from './get-contents'
-import type { Sandbox } from '@vercel/sandbox'
+import type { K8sSandbox } from '@/lib/k8s-sandbox'
 import type { UIMessageStreamWriter, UIMessage } from 'ai'
 import { getRichError } from '../get-rich-error'
 
 interface Params {
-  sandbox: Sandbox
+  sandbox: K8sSandbox
   toolCallId: string
   writer: UIMessageStreamWriter<UIMessage<never, DataPart>>
 }

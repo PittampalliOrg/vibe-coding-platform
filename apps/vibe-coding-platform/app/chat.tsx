@@ -2,7 +2,13 @@
 
 import type { ChatUIMessage } from '@/components/chat/types'
 import { TEST_PROMPTS } from '@/ai/constants'
-import { MessageCircleIcon, SendIcon } from 'lucide-react'
+import {
+  DeleteIcon,
+  MessageCircleIcon,
+  SendIcon,
+  StopCircleIcon,
+  TrashIcon,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Conversation,
@@ -16,10 +22,14 @@ import { Panel, PanelHeader } from '@/components/panels/panels'
 import { Settings } from '@/components/settings/settings'
 import { useChat } from '@ai-sdk/react'
 import { useLocalStorageValue } from '@/lib/use-local-storage-value'
-import { useCallback, useEffect } from 'react'
-import { useSharedChatContext } from '@/lib/chat-context'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSettings } from '@/components/settings/use-settings'
-import { useSandboxStore } from './state'
+import { useDataStateMapper, useSandboxStore } from './state'
+import { toast } from 'sonner'
+import { mutate } from 'swr'
+import type { DataUIPart } from 'ai'
+import type { DataPart } from '@/ai/messages/data-parts'
+import { WorkflowChatTransport } from '@workflow/ai'
 
 interface Props {
   className: string
@@ -27,10 +37,62 @@ interface Props {
 }
 
 export function Chat({ className }: Props) {
-  const [input, setInput] = useLocalStorageValue('prompt-input')
-  const { chat } = useSharedChatContext()
+  const [input, setInput] = useState('')
+  const [currentRunId, setCurrentRunId] = useLocalStorageValue(
+    'storedWorkflowRunId'
+  )
+  const [chatHistory, setChatHistory] = useLocalStorageValue('chatHistory')
   const { modelId, reasoningEffort } = useSettings()
-  const { messages, sendMessage, status } = useChat<ChatUIMessage>({ chat })
+
+  const mapDataToState = useDataStateMapper()
+  const mapDataToStateRef = useRef(mapDataToState)
+
+  const { messages, setMessages, sendMessage, status, stop } =
+    useChat<ChatUIMessage>({
+      resume: Boolean(currentRunId),
+      onToolCall: () => mutate('/api/auth/info'),
+      onData: (data: DataUIPart<DataPart>) => mapDataToStateRef.current(data),
+      onError: (error) => {
+        toast.error(`Communication error with the AI: ${error.message}`)
+        console.error('Error sending message:', error)
+      },
+      transport: new WorkflowChatTransport({
+        api: `/api/chat`,
+        onChatSendMessage: (response, options) => {
+          console.log('onChatSendMessage', response, options)
+
+          setChatHistory(JSON.stringify(options.messages))
+
+          const workflowRunId = response.headers.get('x-workflow-run-id')
+          if (!workflowRunId) {
+            throw new Error(
+              'Workflow run ID not found in "x-workflow-run-id" response header'
+            )
+          }
+
+          setCurrentRunId(workflowRunId)
+        },
+        onChatEnd: ({ chatId, chunkIndex }) => {
+          console.log('onChatEnd', chatId, chunkIndex)
+          // Once the chat stream ends, we can remove the workflow run ID from `localStorage`
+          setCurrentRunId('')
+        },
+        // Configure reconnection to use the stored workflow run ID
+        prepareReconnectToStreamRequest: ({ id, api, ...rest }) => {
+          console.log('prepareReconnectToStreamRequest', id)
+          if (!currentRunId) {
+            throw new Error('No active workflow run ID found')
+          }
+          // Use the workflow run ID instead of the chat ID for reconnection
+          return {
+            ...rest,
+            api: `/api/chat/${encodeURIComponent(currentRunId)}/stream`,
+          }
+        },
+        // Optional: Configure error handling for reconnection attempts
+        maxConsecutiveErrors: 5,
+      }),
+    })
   const { setChatStatus } = useSandboxStore()
 
   const validateAndSubmitMessage = useCallback(
@@ -40,8 +102,14 @@ export function Chat({ className }: Props) {
         setInput('')
       }
     },
-    [sendMessage, modelId, setInput, reasoningEffort]
+    [sendMessage, modelId, reasoningEffort]
   )
+
+  useEffect(() => {
+    if (chatHistory) {
+      setMessages(JSON.parse(chatHistory) as ChatUIMessage[])
+    }
+  }, [chatHistory, setMessages])
 
   useEffect(() => {
     setChatStatus(status)
@@ -65,11 +133,16 @@ export function Chat({ className }: Props) {
               Click and try one of these prompts:
             </p>
             <ul className="p-4 space-y-1 text-center">
-              {TEST_PROMPTS.map((prompt, idx) => (
+              {TEST_PROMPTS.map((prompt) => (
                 <li
-                  key={idx}
+                  key={prompt}
                   className="px-4 py-2 rounded-sm border border-dashed shadow-sm cursor-pointer border-border hover:bg-secondary/50 hover:text-primary"
                   onClick={() => validateAndSubmitMessage(prompt)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      validateAndSubmitMessage(prompt)
+                    }
+                  }}
                 >
                   {prompt}
                 </li>
@@ -104,8 +177,25 @@ export function Chat({ className }: Props) {
           placeholder="Type your message..."
           value={input}
         />
-        <Button type="submit" disabled={status !== 'ready' || !input.trim()}>
-        <SendIcon className="w-4 h-4" />
+        {status === 'ready' ? (
+          <Button type="submit" disabled={!input.trim()}>
+            <SendIcon className="w-4 h-4" />
+          </Button>
+        ) : (
+          <Button type="button" onClick={stop}>
+            <StopCircleIcon className="w-4 h-4" />
+          </Button>
+        )}
+        <Button
+          type="button"
+          onClick={() => {
+            setMessages([])
+            setInput('')
+            localStorage.clear()
+            stop()
+          }}
+        >
+          <TrashIcon className="w-4 h-4" />
         </Button>
       </form>
     </Panel>

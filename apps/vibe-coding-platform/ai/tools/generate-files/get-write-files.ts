@@ -1,13 +1,12 @@
-import type { DataPart } from '../../messages/data-parts'
 import type { File } from './get-contents'
-import type { K8sSandbox } from '@/lib/k8s-sandbox'
-import type { UIMessageStreamWriter, UIMessage } from 'ai'
+import type { Sandbox } from '@/lib/k8s-sandbox'
 import { getRichError } from '../get-rich-error'
+import { UIStreamChunk } from '../types'
 
 interface Params {
-  sandbox: K8sSandbox
+  sandbox: Sandbox
   toolCallId: string
-  writer: UIMessageStreamWriter<UIMessage<never, DataPart>>
+  writer: WritableStreamDefaultWriter<UIStreamChunk>
 }
 
 export function getWriteFiles({ sandbox, toolCallId, writer }: Params) {

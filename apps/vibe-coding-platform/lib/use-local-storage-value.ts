@@ -1,22 +1,13 @@
-import { useEffect, useState } from 'react'
+'use client'
+import { useMemo } from 'react'
 
-export function useLocalStorageValue(key: string) {
-  const [value, setValue] = useState<string>('')
-  const [isInitialized, setIsInitialized] = useState(false)
-
-  useEffect(() => {
-    const storedValue = localStorage.getItem(key)
-    if (storedValue !== null) {
-      setValue(storedValue)
-    }
-    setIsInitialized(true)
+export function useLocalStorageValue(
+  key: string
+): [string, (value: string) => void] {
+  return useMemo(() => {
+    return [
+      localStorage.getItem(key) as string,
+      (value: string) => localStorage.setItem(key, value),
+    ]
   }, [key])
-
-  useEffect(() => {
-    if (isInitialized) {
-      localStorage.setItem(key, value)
-    }
-  }, [key, value, isInitialized])
-
-  return [value, setValue] as const
 }

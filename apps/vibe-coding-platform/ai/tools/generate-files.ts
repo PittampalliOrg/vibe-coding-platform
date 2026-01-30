@@ -1,107 +1,123 @@
-import type { UIMessageStreamWriter, UIMessage } from 'ai'
-import type { DataPart } from '../messages/data-parts'
-import { Sandbox, type K8sSandbox } from '@/lib/k8s-sandbox'
+import { Sandbox } from '@/lib/k8s-sandbox'
 import { getContents, type File } from './generate-files/get-contents'
 import { getRichError } from './get-rich-error'
 import { getWriteFiles } from './generate-files/get-write-files'
-import { tool } from 'ai'
-import description from './generate-files.md'
+import { type ModelMessage, tool } from 'ai'
+import description from './generate-files.prompt'
 import z from 'zod/v3'
+import type { UIStreamChunk } from './types'
+import { getWritable } from 'workflow'
 
-interface Params {
-  modelId: string
-  writer: UIMessageStreamWriter<UIMessage<never, DataPart>>
-}
+const inputSchema = z.object({
+  sandboxId: z.string(),
+  paths: z.array(z.string()),
+})
 
-export const generateFiles = ({ writer, modelId }: Params) =>
-  tool({
-    description,
-    inputSchema: z.object({
-      sandboxId: z.string(),
-      paths: z.array(z.string()),
-    }),
-    execute: async ({ sandboxId, paths }, { toolCallId, messages }) => {
-      writer.write({
-        id: toolCallId,
-        type: 'data-generating-files',
-        data: { paths: [], status: 'generating' },
-      })
+async function executeGenerateFiles(
+  { sandboxId, paths }: z.infer<typeof inputSchema>,
+  { toolCallId }: { toolCallId: string },
+  modelId: string,
+  messages: ModelMessage[]
+) {
+  'use step'
 
-      let sandbox: K8sSandbox | null = null
+  const writable = getWritable<UIStreamChunk>()
+  const writer = writable.getWriter()
 
-      try {
-        sandbox = await Sandbox.get({ sandboxId })
-      } catch (error) {
-        const richError = getRichError({
-          action: 'get sandbox by id',
-          args: { sandboxId },
-          error,
-        })
+  writer.write({
+    id: toolCallId,
+    type: 'data-generating-files',
+    data: { paths: [], status: 'generating' },
+  })
 
-        writer.write({
-          id: toolCallId,
-          type: 'data-generating-files',
-          data: { error: richError.error, paths: [], status: 'error' },
-        })
+  let sandbox: Sandbox | null = null
 
-        return richError.message
-      }
+  try {
+    sandbox = await Sandbox.get({ sandboxId })
+  } catch (error) {
+    const richError = getRichError({
+      action: 'get sandbox by id',
+      args: { sandboxId },
+      error,
+    })
 
-      const writeFiles = getWriteFiles({ sandbox, toolCallId, writer })
-      const iterator = getContents({ messages, modelId, paths })
-      const uploaded: File[] = []
+    writer.write({
+      id: toolCallId,
+      type: 'data-generating-files',
+      data: { error: richError.error, paths: [], status: 'error' },
+    })
 
-      try {
-        for await (const chunk of iterator) {
-          if (chunk.files.length > 0) {
-            const error = await writeFiles(chunk)
-            if (error) {
-              return error
-            } else {
-              uploaded.push(...chunk.files)
-            }
-          } else {
-            writer.write({
-              id: toolCallId,
-              type: 'data-generating-files',
-              data: {
-                status: 'generating',
-                paths: chunk.paths,
-              },
-            })
-          }
+    return richError.message
+  }
+
+  const writeFiles = getWriteFiles({ sandbox, toolCallId, writer })
+  const iterator = getContents({ messages, modelId, paths })
+  const uploaded: File[] = []
+
+  try {
+    for await (const chunk of iterator) {
+      if (chunk.files.length > 0) {
+        const error = await writeFiles(chunk)
+        if (error) {
+          return error
+        } else {
+          uploaded.push(...chunk.files)
         }
-      } catch (error) {
-        const richError = getRichError({
-          action: 'generate file contents',
-          args: { modelId, paths },
-          error,
-        })
-
+      } else {
         writer.write({
           id: toolCallId,
           type: 'data-generating-files',
           data: {
-            error: richError.error,
-            status: 'error',
-            paths,
+            status: 'generating',
+            paths: chunk.paths,
           },
         })
-
-        return richError.message
       }
+    }
+  } catch (error) {
+    const richError = getRichError({
+      action: 'generate file contents',
+      args: { modelId, paths },
+      error,
+    })
 
-      writer.write({
-        id: toolCallId,
-        type: 'data-generating-files',
-        data: { paths: uploaded.map((file) => file.path), status: 'done' },
-      })
+    writer.write({
+      id: toolCallId,
+      type: 'data-generating-files',
+      data: {
+        error: richError.error,
+        status: 'error',
+        paths,
+      },
+    })
 
-      return `Successfully generated and uploaded ${
-        uploaded.length
-      } files. Their paths and contents are as follows:
-        ${uploaded
-          .map((file) => `Path: ${file.path}\nContent: ${file.content}\n`)
-          .join('\n')}`
-    },
+    return richError.message
+  }
+
+  writer.write({
+    id: toolCallId,
+    type: 'data-generating-files',
+    data: { paths: uploaded.map((file) => file.path), status: 'done' },
+  })
+
+  return `Successfully generated and uploaded ${
+    uploaded.length
+  } files. Their paths and contents are as follows:
+    ${uploaded
+      .map((file) => `Path: ${file.path}\nContent: ${file.content}\n`)
+      .join('\n')}`
+}
+
+export const generateFiles = ({
+  modelId,
+  messages,
+}: {
+  modelId: string
+  messages: ModelMessage[]
+}) =>
+  tool({
+    description,
+    inputSchema,
+    execute: (args, options) =>
+      executeGenerateFiles(args, options, modelId, messages),
   })

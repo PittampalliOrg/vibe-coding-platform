@@ -1,21 +1,24 @@
-import type { InferUITools, UIMessage, UIMessageStreamWriter } from 'ai'
-import type { DataPart } from '../messages/data-parts'
+import type { InferUITools, ModelMessage } from 'ai'
 import { createSandbox } from './create-sandbox'
 import { generateFiles } from './generate-files'
 import { getSandboxURL } from './get-sandbox-url'
 import { runCommand } from './run-command'
+import { sleepTool } from './sleep'
+import { humanApprovalTool } from './human-approval'
 
 interface Params {
   modelId: string
-  writer: UIMessageStreamWriter<UIMessage<never, DataPart>>
+  messages: ModelMessage[]
 }
 
-export function tools({ modelId, writer }: Params) {
+export function tools({ modelId, messages }: Params) {
   return {
-    createSandbox: createSandbox({ writer }),
-    generateFiles: generateFiles({ writer, modelId }),
-    getSandboxURL: getSandboxURL({ writer }),
-    runCommand: runCommand({ writer }),
+    createSandbox: createSandbox(),
+    generateFiles: generateFiles({ modelId, messages }),
+    getSandboxURL: getSandboxURL(),
+    runCommand: runCommand(),
+    sleep: sleepTool(),
+    humanApproval: humanApprovalTool(),
   }
 }
 

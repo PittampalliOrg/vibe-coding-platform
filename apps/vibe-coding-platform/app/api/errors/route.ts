@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import { checkBotId } from 'botid/server'
 import { generateText, Output } from 'ai'
 import { linesSchema, resultSchema } from '@/components/error-monitor/schemas'
-import prompt from './prompt.md'
+import prompt from './errors.prompt'
 
 export async function POST(req: Request) {
   const checkResult = await checkBotId()

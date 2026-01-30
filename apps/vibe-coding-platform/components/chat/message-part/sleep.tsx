@@ -3,7 +3,6 @@ import { CheckIcon, PauseIcon } from 'lucide-react'
 import { Spinner } from './spinner'
 import { ToolHeader } from '../tool-header'
 import { ToolMessage } from '../tool-message'
-import Markdown from 'react-markdown'
 
 export function Sleep({ message }: { message: DataPart['wait'] }) {
   return (
@@ -15,7 +14,7 @@ export function Sleep({ message }: { message: DataPart['wait'] }) {
         <Spinner className="absolute left-0 top-0" loading={false}>
           <CheckIcon className="w-4 h-4" />
         </Spinner>
-        <Markdown>{message.text}</Markdown>
+        <span className="text-sm text-muted-foreground">{message.text}</span>
       </div>
     </ToolMessage>
   )

@@ -39,11 +39,14 @@ export async function POST(req: Request) {
     )
   }
 
-  const modelMessages = convertToModelMessages(messages)
+  // Pass UI messages directly - workflow will convert them
+  // JSON serialize to ensure they're POJOs for workflow runtime
+  const serializableMessages = JSON.parse(JSON.stringify(messages))
+  console.log('[DEBUG] Messages:', JSON.stringify(serializableMessages, null, 2))
 
   const run = await start(codeWorkflow, [
     {
-      messages: modelMessages,
+      messages: serializableMessages,
       modelId,
     },
   ])

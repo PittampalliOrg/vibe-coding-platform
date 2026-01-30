@@ -3,7 +3,6 @@
 import type { ChatUIMessage } from '@/components/chat/types'
 import { TEST_PROMPTS } from '@/ai/constants'
 import {
-  DeleteIcon,
   MessageCircleIcon,
   SendIcon,
   StopCircleIcon,
@@ -22,14 +21,13 @@ import { Panel, PanelHeader } from '@/components/panels/panels'
 import { Settings } from '@/components/settings/settings'
 import { useChat } from '@ai-sdk/react'
 import { useLocalStorageValue } from '@/lib/use-local-storage-value'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSettings } from '@/components/settings/use-settings'
 import { useDataStateMapper, useSandboxStore } from './state'
 import { toast } from 'sonner'
 import { mutate } from 'swr'
 import type { DataUIPart } from 'ai'
 import type { DataPart } from '@/ai/messages/data-parts'
-import { WorkflowChatTransport } from '@workflow/ai'
 
 interface Props {
   className: string
@@ -38,9 +36,6 @@ interface Props {
 
 export function Chat({ className }: Props) {
   const [input, setInput] = useState('')
-  const [currentRunId, setCurrentRunId] = useLocalStorageValue(
-    'storedWorkflowRunId'
-  )
   const [chatHistory, setChatHistory] = useLocalStorageValue('chatHistory')
   const { modelId, reasoningEffort } = useSettings()
 
@@ -49,49 +44,20 @@ export function Chat({ className }: Props) {
 
   const { messages, setMessages, sendMessage, status, stop } =
     useChat<ChatUIMessage>({
-      resume: Boolean(currentRunId),
+      api: '/api/chat',
       onToolCall: () => mutate('/api/auth/info'),
       onData: (data: DataUIPart<DataPart>) => mapDataToStateRef.current(data),
       onError: (error) => {
         toast.error(`Communication error with the AI: ${error.message}`)
         console.error('Error sending message:', error)
       },
-      transport: new WorkflowChatTransport({
-        api: `/api/chat`,
-        onChatSendMessage: (response, options) => {
-          console.log('onChatSendMessage', response, options)
-
-          setChatHistory(JSON.stringify(options.messages))
-
-          const workflowRunId = response.headers.get('x-workflow-run-id')
-          if (!workflowRunId) {
-            throw new Error(
-              'Workflow run ID not found in "x-workflow-run-id" response header'
-            )
-          }
-
-          setCurrentRunId(workflowRunId)
-        },
-        onChatEnd: ({ chatId, chunkIndex }) => {
-          console.log('onChatEnd', chatId, chunkIndex)
-          // Once the chat stream ends, we can remove the workflow run ID from `localStorage`
-          setCurrentRunId('')
-        },
-        // Configure reconnection to use the stored workflow run ID
-        prepareReconnectToStreamRequest: ({ id, api, ...rest }) => {
-          console.log('prepareReconnectToStreamRequest', id)
-          if (!currentRunId) {
-            throw new Error('No active workflow run ID found')
-          }
-          // Use the workflow run ID instead of the chat ID for reconnection
-          return {
-            ...rest,
-            api: `/api/chat/${encodeURIComponent(currentRunId)}/stream`,
-          }
-        },
-        // Optional: Configure error handling for reconnection attempts
-        maxConsecutiveErrors: 5,
-      }),
+      onResponse: (response) => {
+        console.log('Chat response received', response.status)
+      },
+      onFinish: (message) => {
+        console.log('Chat finished', message.id)
+        setChatHistory(JSON.stringify([...messages, message]))
+      },
     })
   const { setChatStatus } = useSandboxStore()
 
@@ -107,7 +73,12 @@ export function Chat({ className }: Props) {
 
   useEffect(() => {
     if (chatHistory) {
-      setMessages(JSON.parse(chatHistory) as ChatUIMessage[])
+      // Filter out invalid messages that may have been stored with missing required properties
+      const parsedMessages = JSON.parse(chatHistory) as ChatUIMessage[]
+      const validMessages = parsedMessages.filter(
+        (msg) => msg.role === 'user' || msg.role === 'assistant'
+      )
+      setMessages(validMessages)
     }
   }, [chatHistory, setMessages])
 
@@ -153,8 +124,8 @@ export function Chat({ className }: Props) {
       ) : (
         <Conversation className="relative w-full">
           <ConversationContent className="space-y-4">
-            {messages.map((message) => (
-              <Message key={message.id} message={message} />
+            {messages.map((message, index) => (
+              <Message key={message.id ?? index} message={message} />
             ))}
           </ConversationContent>
           <ConversationScrollButton />

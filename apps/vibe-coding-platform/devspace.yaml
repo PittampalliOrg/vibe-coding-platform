@@ -54,28 +54,39 @@ dev:
         cd /app
 
         echo "Checking dependencies..."
-        # Only install if node_modules is missing or package.json changed
-        if [ ! -d "node_modules" ] || [ ! -f "node_modules/.pnpm-lock-hash" ] || \
-           [ "$(cat node_modules/.pnpm-lock-hash 2>/dev/null)" != "$(md5sum pnpm-lock.yaml | cut -d' ' -f1)" ]; then
-          echo "Installing dependencies..."
-          pnpm install --frozen-lockfile
-          md5sum pnpm-lock.yaml | cut -d' ' -f1 > node_modules/.pnpm-lock-hash
+        # Compute hashes for cache invalidation
+        LOCK_HASH=$(md5sum pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1 || echo "none")
+        PKG_HASH=$(md5sum apps/vibe-coding-platform/package.json 2>/dev/null | cut -d' ' -f1 || echo "none")
+        COMBINED_HASH="${LOCK_HASH}-${PKG_HASH}"
+        CACHED_HASH=$(cat node_modules/.deps-hash 2>/dev/null || echo "")
+
+        # Install if node_modules missing or any package file changed
+        if [ ! -d "node_modules" ] || [ "$COMBINED_HASH" != "$CACHED_HASH" ]; then
+          echo "Installing dependencies (lock or package.json changed)..."
+          pnpm install
+          echo "$COMBINED_HASH" > node_modules/.deps-hash
         else
           echo "Dependencies up to date (cached)"
         fi
 
-        # Add node_modules/.bin to PATH
-        export PATH="/app/node_modules/.bin:$PATH"
+        # Build workspace packages (required for monorepo dependencies)
+        echo "Building workspace packages..."
+        if [ -d "/app/packages/workflow-worlds-dapr" ] && [ ! -d "/app/packages/workflow-worlds-dapr/dist" ]; then
+          echo "Building @workflow-worlds/dapr..."
+          cd /app/packages/workflow-worlds-dapr
+          pnpm run build
+        fi
 
         # Move to app directory
         cd /app/apps/vibe-coding-platform
 
         echo "Starting Next.js development server with Turbo..."
-        exec next dev --turbo
+        # Use pnpm to run next from the workspace (handles pnpm's node_modules structure)
+        exec pnpm exec next dev --turbo
 
     # File synchronization
     # Sync only essential source code to container
-    # Uses emptyDir volume for /app to ensure proper write permissions
+    # Uses persistPaths PVC for /app to ensure proper write permissions
     sync:
       - path: ../../:/app
         initialSync: mirrorLocal
@@ -110,7 +121,11 @@ dev:
           - vitest.config.ts
           # === DOCS (not needed at runtime) ===
           - docs/
-          - "*.md"
+          # Only exclude root-level markdown files (README, CHANGELOG, etc)
+          # NOT .md files in subdirectories (ai/tools/*.md are needed for tool descriptions)
+          - README.md
+          - CHANGELOG.md
+          - CONTRIBUTING.md
           - "*.log"
           - LICENSE
           - Dockerfile
@@ -125,22 +140,38 @@ dev:
           - .env.local
           - .env.example
 
-    # Note: persistPaths disabled to avoid PVC issues
-    # If you need faster restarts, uncomment and ensure PVC cleanup works
-    # persistPaths:
-    #   - path: /tmp
-    #     skipPopulate: true
-    #   - path: /app/node_modules
+    # Persist /app workspace with proper permissions
+    # This creates a PVC and uses an init container to ensure correct ownership
+    # before sync starts. This is the recommended DevSpace approach for avoiding
+    # permission denied errors during file sync.
+    persistPaths:
+      - path: /app
+        # Don't copy existing container contents - we sync from local
+        skipPopulate: true
+
+    # PVC configuration for the workspace
+    persistenceOptions:
+      size: 10Gi
+      # Use default storage class (usually local-path or standard)
+      # storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
 
     # Patches to configure the pod for development
     patches:
+      # Add Dapr health check annotations (ensures sidecar waits for app)
+      - op: add
+        path: spec.template.metadata.annotations.dapr\.io/enable-app-health-check
+        value: "true"
+      - op: add
+        path: spec.template.metadata.annotations.dapr\.io/app-health-check-path
+        value: "/api/health"
       # Remove health checks (dev server startup is slower)
       - op: remove
         path: spec.containers.name=vibe-coding-platform.livenessProbe
       - op: remove
         path: spec.containers.name=vibe-coding-platform.readinessProbe
       # Run vibe-coding-platform container as root for development to avoid permission issues
-      # Keep pod-level securityContext compatible with Dapr sidecar (non-root)
       - op: replace
         path: spec.containers.name=vibe-coding-platform.securityContext
         value:
@@ -148,11 +179,11 @@ dev:
           runAsGroup: 0
           runAsNonRoot: false
           allowPrivilegeEscalation: false
-      # Keep pod fsGroup for volume permissions, but allow non-root override per container
+      # Keep pod fsGroup for volume permissions
       - op: replace
         path: spec.securityContext
         value:
-          fsGroup: 1001
+          fsGroup: 0
           runAsNonRoot: false
 
     # Port forwarding for development
@@ -166,15 +197,13 @@ dev:
       localPort: 2224  # Different from other projects to avoid conflicts
 
     # Environment variables for development
-    # Only override values that differ from production deployment
-    # All other env vars come from ConfigMaps and the base Deployment
+    # Only override values that DIFFER from the base Deployment in stacks repo
+    # Base deployment already sets: DAPR_ENABLED=true, SANDBOX_*, OTEL_*, etc.
     env:
       - name: NODE_ENV
         value: development
       - name: NEXT_TELEMETRY_DISABLED
         value: "1"
-      # Override OTEL service name and environment for dev
-      - name: OTEL_SERVICE_NAME
-        value: "vibe-coding-platform-dev"
-      - name: OTEL_RESOURCE_ATTRIBUTES
-        value: "deployment.environment=development,service.namespace=vibe-coding-platform-dev,service.version=dev"
+      # Increase Dapr sidecar wait time for dev (sidecar takes longer to initialize)
+      - name: DAPR_SIDECAR_WAIT_ATTEMPTS
+        value: "180"

@@ -3,6 +3,10 @@ import { withBotId } from 'botid/next/config'
 import { withWorkflow } from 'workflow/next'
 
 const nextConfig: NextConfig = {
+  // Enable standalone output for Docker deployment
+  output: 'standalone',
+  // Mark Dapr packages as external to prevent Edge runtime bundling issues
+  serverExternalPackages: ['@dapr/dapr', '@workflow-worlds/dapr'],
   webpack(config) {
     config.module.rules.push({
       test: /\.md/,

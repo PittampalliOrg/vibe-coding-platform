@@ -34,6 +34,7 @@ function getModelDisplayName(modelId: string): string {
     [Models.OpenAIGPT52]: 'GPT-5.2',
     [Models.AmazonNovaPro]: 'Amazon Nova Pro',
     [Models.AnthropicClaude4Sonnet]: 'Claude 4 Sonnet',
+    [Models.AnthropicClaude45Haiku]: 'Claude 4.5 Haiku',
     [Models.AnthropicClaude45Sonnet]: 'Claude 4.5 Sonnet',
     [Models.GoogleGeminiFlash]: 'Gemini 2.5 Flash',
     [Models.MoonshotKimiK2]: 'Kimi K2',
@@ -76,6 +77,7 @@ function getOpenAIProvider() {
 // Map app model IDs to real Anthropic model IDs
 const ANTHROPIC_MODEL_MAP: Record<string, string> = {
   [Models.AnthropicClaude4Sonnet]: 'claude-sonnet-4-20250514',
+  [Models.AnthropicClaude45Haiku]: 'claude-haiku-4-5-20250929',
   [Models.AnthropicClaude45Sonnet]: 'claude-sonnet-4-5-20250929',
 }
 

@@ -27,7 +27,9 @@ export const Message = memo(function Message({ message }: Props) {
     number | null
   >(null)
 
-  const reasoningParts = message.parts
+  // Fallback for messages loaded from localStorage that may not have parts
+  const parts = message.parts ?? []
+  const reasoningParts = parts
     .map((part, index) => ({ part, index }))
     .filter(({ part }) => part.type === 'reasoning')
 
@@ -66,7 +68,7 @@ export const Message = memo(function Message({ message }: Props) {
 
         {/* Message Content */}
         <div className="space-y-1.5">
-          {message.parts.map((part, index) => (
+          {parts.map((part, index) => (
             <MessagePart key={index} part={part} partIndex={index} />
           ))}
         </div>

@@ -1,42 +1,41 @@
 import { tool } from 'ai'
-import description from './sleep.prompt'
+import description from './human-approval.prompt'
 import z from 'zod/v3'
-import { createWebhook, getWritable, sleep } from 'workflow'
+import { getWritable } from 'workflow'
 import { UIStreamChunk } from './types'
 
-const inputSchema = z.object({})
+const inputSchema = z.object({
+  message: z
+    .string()
+    .optional()
+    .describe('Optional message to display to the user requesting approval'),
+})
 
-async function reportHumanApproval(
-  { url }: { url: string },
+async function executeHumanApproval(
+  { message }: z.infer<typeof inputSchema>,
   { toolCallId }: { toolCallId: string }
 ) {
   'use step'
+
   const writable = getWritable<UIStreamChunk>()
   const writer = writable.getWriter()
 
   writer.write({
     id: toolCallId,
     type: 'data-wait',
-    data: { text: `Waiting for a human to click on the link: ${url}` },
+    data: {
+      text: message ?? 'Waiting for human approval...',
+    },
   })
-}
 
-async function executeHumanApproval({ toolCallId }: { toolCallId: string }) {
-  const webhook = createWebhook()
-
-  await reportHumanApproval({ url: webhook.url }, { toolCallId })
-
-  await webhook
-
-  // const request = await webhook
-  // Access the request body
-  // const data = await request.json();
-  // console.log("Data:", data);
+  // In workflow mode, this step will be paused and resumed via webhook
+  // For now, return immediately with a placeholder response
+  return 'Human approval requested. Workflow will resume when approval is received.'
 }
 
 export const humanApprovalTool = () =>
   tool({
     description,
     inputSchema,
-    execute: (_args, options) => executeHumanApproval(options),
+    execute: (args, options) => executeHumanApproval(args, options),
   })

@@ -32,6 +32,11 @@ RUN apt-get update && apt-get install -y \
     # Create symlinks for common tool names
     && ln -sf /usr/bin/fdfind /usr/bin/fd
 
+# Install kubectl for Kubernetes sandbox exec operations
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+    chmod +x kubectl && \
+    mv kubectl /usr/local/bin/kubectl
+
 # The node:22 image already has user 'node' with UID 1000
 # Create and configure /app directory with proper ownership
 # Also create /.devspace for devspace restart helper signal file

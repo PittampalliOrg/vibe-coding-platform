@@ -10,14 +10,20 @@ import { Writable } from 'stream'
 import {
   type SandboxClaim,
   type SandboxClaimStatus,
+  type SandboxResource,
   SandboxError,
   getEnvConfig,
 } from './types'
 
-// Custom Resource API group and version
-const SANDBOX_API_GROUP = 'extensions.agents.x-k8s.io'
+// Custom Resource API group and version for SandboxClaim (extensions)
+const SANDBOX_CLAIM_API_GROUP = 'extensions.agents.x-k8s.io'
+const SANDBOX_CLAIM_API_VERSION = 'v1alpha1'
+const SANDBOX_CLAIM_PLURAL = 'sandboxclaims'
+
+// Custom Resource API group and version for Sandbox (core)
+const SANDBOX_API_GROUP = 'agents.x-k8s.io'
 const SANDBOX_API_VERSION = 'v1alpha1'
-const SANDBOX_PLURAL = 'sandboxclaims'
+const SANDBOX_PLURAL = 'sandboxes'
 
 /**
  * Interface for K8s API error responses
@@ -83,33 +89,40 @@ export class K8sClient {
     const namespace = this.config.SANDBOX_NAMESPACE
     const template = params.template ?? this.config.SANDBOX_TEMPLATE
 
+    // Ensure the name is valid for K8s (lowercase alphanumeric + dashes only)
+    const safeName = params.name.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+
     const sandboxClaim: SandboxClaim = {
-      apiVersion: `${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}`,
+      apiVersion: `${SANDBOX_CLAIM_API_GROUP}/${SANDBOX_CLAIM_API_VERSION}`,
       kind: 'SandboxClaim',
       metadata: {
-        name: params.name,
+        name: safeName,
         namespace,
         labels: {
           'app.kubernetes.io/managed-by': 'vibe-coding-platform',
-          'sandbox.vibe-coding-platform/id': params.name,
+          'sandbox.vibe-coding-platform/id': safeName,
         },
         annotations: {
           'sandbox.vibe-coding-platform/created-at': new Date().toISOString(),
+          // Store timeout and ports in annotations since CRD doesn't have these fields
+          'sandbox.vibe-coding-platform/timeout-seconds': String(params.timeoutSeconds),
+          'sandbox.vibe-coding-platform/ports': JSON.stringify(params.ports),
         },
       },
       spec: {
-        template,
-        timeoutSeconds: params.timeoutSeconds,
-        ports: params.ports,
+        // SandboxClaim CRD only has sandboxTemplateRef field
+        sandboxTemplateRef: {
+          name: template,
+        },
       },
     }
 
     try {
       const response = await this.customApi.createNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
+        group: SANDBOX_CLAIM_API_GROUP,
+        version: SANDBOX_CLAIM_API_VERSION,
         namespace,
-        plural: SANDBOX_PLURAL,
+        plural: SANDBOX_CLAIM_PLURAL,
         body: sandboxClaim,
       })
 
@@ -132,10 +145,10 @@ export class K8sClient {
 
     try {
       const response = await this.customApi.getNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
+        group: SANDBOX_CLAIM_API_GROUP,
+        version: SANDBOX_CLAIM_API_VERSION,
         namespace,
-        plural: SANDBOX_PLURAL,
+        plural: SANDBOX_CLAIM_PLURAL,
         name,
       })
 
@@ -154,77 +167,165 @@ export class K8sClient {
   }
 
   /**
+   * Get a Sandbox resource by name
+   */
+  async getSandbox(name: string): Promise<SandboxResource | null> {
+    const namespace = this.config.SANDBOX_NAMESPACE
+
+    try {
+      const response = await this.customApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace,
+        plural: SANDBOX_PLURAL,
+        name,
+      })
+
+      return response as unknown as SandboxResource
+    } catch (error) {
+      const { statusCode, message } = getK8sErrorDetails(error)
+      if (statusCode === 404) {
+        return null
+      }
+      throw new SandboxError(
+        `Failed to get Sandbox: ${message}`,
+        'kubernetes_error',
+        { error }
+      )
+    }
+  }
+
+  /**
+   * Find pods by label selector
+   */
+  async findPodsBySelector(selector: string): Promise<k8s.V1Pod[]> {
+    const namespace = this.config.SANDBOX_NAMESPACE
+
+    try {
+      const response = await this.coreApi.listNamespacedPod({
+        namespace,
+        labelSelector: selector,
+      })
+      return response.items
+    } catch (error) {
+      const { message } = getK8sErrorDetails(error)
+      throw new SandboxError(
+        `Failed to find pods: ${message}`,
+        'kubernetes_error',
+        { error }
+      )
+    }
+  }
+
+  /**
    * Wait for a SandboxClaim to be ready (pod allocated and running)
+   *
+   * Flow:
+   * 1. Wait for SandboxClaim to have status.sandbox.Name
+   * 2. Get the Sandbox and wait for it to be ready
+   * 3. Find pod using selector and get its IP
    */
   async waitForSandboxReady(
     name: string,
     timeoutMs: number = 120000
-  ): Promise<SandboxClaimStatus> {
+  ): Promise<{ sandboxName: string; podName: string; podIP: string; serviceFQDN?: string; service?: string }> {
     const startTime = Date.now()
 
-    return new Promise((resolve, reject) => {
-      const checkStatus = async () => {
-        const elapsed = Date.now() - startTime
-        if (elapsed > timeoutMs) {
-          reject(
-            new SandboxError(
-              `Timeout waiting for sandbox ${name} to be ready`,
-              'sandbox_timeout',
-              { timeoutMs, elapsed }
-            )
-          )
-          return
-        }
+    const checkTimeout = () => {
+      if (Date.now() - startTime > timeoutMs) {
+        throw new SandboxError(
+          `Timeout waiting for sandbox ${name} to be ready`,
+          'sandbox_timeout',
+          { timeoutMs, elapsed: Date.now() - startTime }
+        )
+      }
+    }
 
-        try {
-          const claim = await this.getSandboxClaim(name)
+    // Step 1: Wait for SandboxClaim to have sandbox reference
+    let sandboxName: string | undefined
+    while (!sandboxName) {
+      checkTimeout()
 
-          if (!claim) {
-            reject(
-              new SandboxError(
-                `SandboxClaim ${name} not found`,
-                'sandbox_not_found'
-              )
-            )
-            return
-          }
-
-          const status = claim.status
-
-          if (status?.phase === 'Running' && status.podIP && status.podName) {
-            resolve(status)
-            return
-          }
-
-          if (status?.phase === 'Failed' || status?.phase === 'Terminated') {
-            reject(
-              new SandboxError(
-                `Sandbox ${name} failed: ${status.errorMessage ?? 'Unknown error'}`,
-                'sandbox_creation_failed',
-                { phase: status.phase, errorMessage: status.errorMessage }
-              )
-            )
-            return
-          }
-
-          // Still pending, check again
-          setTimeout(checkStatus, 1000)
-        } catch (error) {
-          if (error instanceof SandboxError) {
-            reject(error)
-          } else {
-            reject(
-              new SandboxError(
-                `Error checking sandbox status: ${(error as Error).message}`,
-                'kubernetes_error'
-              )
-            )
-          }
-        }
+      const claim = await this.getSandboxClaim(name)
+      if (!claim) {
+        throw new SandboxError(`SandboxClaim ${name} not found`, 'sandbox_not_found')
       }
 
-      checkStatus()
-    })
+      // Check for failure conditions
+      const failedCondition = claim.status?.conditions?.find(
+        (c) => c.type === 'Ready' && c.status === 'False' && c.reason === 'Failed'
+      )
+      if (failedCondition) {
+        throw new SandboxError(
+          `Sandbox ${name} failed: ${failedCondition.message}`,
+          'sandbox_creation_failed',
+          { condition: failedCondition }
+        )
+      }
+
+      sandboxName = claim.status?.sandbox?.Name
+      if (!sandboxName) {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+    }
+
+    // Step 2: Wait for Sandbox to be ready
+    let selector: string | undefined
+    let serviceFQDN: string | undefined
+    let service: string | undefined
+
+    while (!selector) {
+      checkTimeout()
+
+      const sandbox = await this.getSandbox(sandboxName)
+      if (!sandbox) {
+        throw new SandboxError(`Sandbox ${sandboxName} not found`, 'sandbox_not_found')
+      }
+
+      // Check for ready condition
+      const readyCondition = sandbox.status?.conditions?.find((c) => c.type === 'Ready')
+      if (readyCondition?.status === 'False' && readyCondition.reason === 'Failed') {
+        throw new SandboxError(
+          `Sandbox ${sandboxName} failed: ${readyCondition.message}`,
+          'sandbox_creation_failed',
+          { condition: readyCondition }
+        )
+      }
+
+      selector = sandbox.status?.selector
+      serviceFQDN = sandbox.status?.serviceFQDN
+      service = sandbox.status?.service
+
+      if (!selector) {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+    }
+
+    // Step 3: Find pod using selector and wait for it to be running
+    let podName: string | undefined
+    let podIP: string | undefined
+
+    while (!podIP) {
+      checkTimeout()
+
+      const pods = await this.findPodsBySelector(selector)
+      const runningPod = pods.find((p) => p.status?.phase === 'Running' && p.status?.podIP)
+
+      if (runningPod) {
+        podName = runningPod.metadata?.name
+        podIP = runningPod.status?.podIP
+      } else {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+    }
+
+    return {
+      sandboxName,
+      podName: podName!,
+      podIP,
+      serviceFQDN,
+      service,
+    }
   }
 
   /**
@@ -235,10 +336,10 @@ export class K8sClient {
 
     try {
       await this.customApi.deleteNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
+        group: SANDBOX_CLAIM_API_GROUP,
+        version: SANDBOX_CLAIM_API_VERSION,
         namespace,
-        plural: SANDBOX_PLURAL,
+        plural: SANDBOX_CLAIM_PLURAL,
         name,
       })
     } catch (error) {
@@ -262,10 +363,10 @@ export class K8sClient {
 
     try {
       const response = await this.customApi.listNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
+        group: SANDBOX_CLAIM_API_GROUP,
+        version: SANDBOX_CLAIM_API_VERSION,
         namespace,
-        plural: SANDBOX_PLURAL,
+        plural: SANDBOX_CLAIM_PLURAL,
         labelSelector: 'app.kubernetes.io/managed-by=vibe-coding-platform',
       })
 
@@ -315,8 +416,8 @@ export class K8sClient {
   }
 
   /**
-   * Execute a command in a pod using kubectl exec (via Kubernetes API)
-   * This is used for simple synchronous commands
+   * Execute a command in a pod using kubectl exec subprocess
+   * Uses subprocess to avoid WebSocket/proxy issues with the Kubernetes client
    */
   async execInPod(
     podName: string,
@@ -324,43 +425,37 @@ export class K8sClient {
     container?: string
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const namespace = this.config.SANDBOX_NAMESPACE
-    const exec = new k8s.Exec(this.kubeConfig)
+    const { execSync, spawnSync } = await import('child_process')
 
-    return new Promise((resolve, reject) => {
-      let stdout = ''
-      let stderr = ''
+    const containerArg = container ?? 'sandbox'
+    const kubectlArgs = [
+      'exec',
+      '-n', namespace,
+      podName,
+      '-c', containerArg,
+      '--',
+      ...command
+    ]
 
-      const stdoutStream = new Writable({
-        write(chunk, _encoding, callback) {
-          stdout += chunk.toString()
-          callback()
-        },
+    try {
+      const result = spawnSync('kubectl', kubectlArgs, {
+        encoding: 'utf-8',
+        timeout: 30000, // 30 second timeout
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
       })
 
-      const stderrStream = new Writable({
-        write(chunk, _encoding, callback) {
-          stderr += chunk.toString()
-          callback()
-        },
-      })
-
-      exec
-        .exec(
-          namespace,
-          podName,
-          container ?? 'sandbox',
-          command,
-          stdoutStream,
-          stderrStream,
-          null,
-          false,
-          (status: k8s.V1Status) => {
-            const exitCode = status.status === 'Success' ? 0 : 1
-            resolve({ stdout, stderr, exitCode })
-          }
-        )
-        .catch(reject)
-    })
+      return {
+        stdout: result.stdout || '',
+        stderr: result.stderr || '',
+        exitCode: result.status ?? 1,
+      }
+    } catch (error) {
+      return {
+        stdout: '',
+        stderr: (error as Error).message,
+        exitCode: 1,
+      }
+    }
   }
 
   /**

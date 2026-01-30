@@ -1,0 +1,61 @@
+{
+  "name": "@workflow-worlds/dapr",
+  "version": "0.1.0",
+  "description": "Dapr World implementation for Vercel Workflow DevKit - enables Kubernetes-native, self-hosted durable workflow execution",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./web-adapter": {
+      "types": "./dist/web-adapter/index.d.ts",
+      "import": "./dist/web-adapter/index.mjs",
+      "require": "./dist/web-adapter/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/web-adapter/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts src/web-adapter/index.ts --format cjs,esm --dts --watch",
+    "lint": "eslint src/",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@dapr/dapr": "^3.4.1"
+  },
+  "peerDependencies": {
+    "workflow": "^4.0.1-beta.0 || ^2.0.0 || ^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "workflow": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "keywords": [
+    "dapr",
+    "workflow",
+    "vercel",
+    "kubernetes",
+    "durable-workflow",
+    "state-management"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PittampalliOrg/vibe-coding-platform"
+  }
+}

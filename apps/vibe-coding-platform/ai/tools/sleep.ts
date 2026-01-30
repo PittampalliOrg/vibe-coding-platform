@@ -1,18 +1,23 @@
 import { tool } from 'ai'
 import description from './sleep.prompt'
 import z from 'zod/v3'
-import { getWritable, sleep } from 'workflow'
+import { getWritable } from 'workflow'
 import { UIStreamChunk } from './types'
 
 const inputSchema = z.object({
   sleepForMs: z.number().describe('The number of milliseconds to sleep'),
 })
 
-async function reportSleep(
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function executeSleep(
   { sleepForMs }: z.infer<typeof inputSchema>,
   { toolCallId }: { toolCallId: string }
 ) {
   'use step'
+
   const writable = getWritable<UIStreamChunk>()
   const writer = writable.getWriter()
 
@@ -23,15 +28,10 @@ async function reportSleep(
     type: 'data-wait',
     data: { text: `Sleeping for ${sleepSeconds} seconds` },
   })
-}
 
-async function executeSleep(
-  { sleepForMs }: z.infer<typeof inputSchema>,
-  { toolCallId }: { toolCallId: string }
-) {
-  await reportSleep({ sleepForMs }, { toolCallId })
+  await delay(sleepForMs)
 
-  await sleep(sleepForMs)
+  return `Slept for ${sleepSeconds} seconds.`
 }
 
 export const sleepTool = () =>

@@ -201,66 +201,100 @@ export interface Command {
 
 /**
  * SandboxClaim Custom Resource spec
+ * Note: The actual CRD only has sandboxTemplateRef.
+ * Other fields (timeout, ports) are stored in annotations.
  */
 export interface SandboxClaimSpec {
   /**
-   * Name of the SandboxTemplate to use
+   * Reference to the SandboxTemplate to use
    */
-  template: string
-
-  /**
-   * Timeout in seconds
-   */
-  timeoutSeconds: number
-
-  /**
-   * Ports to expose
-   */
-  ports: number[]
-
-  /**
-   * Resource requests/limits
-   */
-  resources?: {
-    requests?: {
-      cpu?: string
-      memory?: string
-    }
-    limits?: {
-      cpu?: string
-      memory?: string
-    }
+  sandboxTemplateRef: {
+    name: string
   }
 }
 
 /**
  * SandboxClaim status from Kubernetes
+ * Matches the actual CRD schema from kubernetes-sigs/agent-sandbox
  */
 export interface SandboxClaimStatus {
   /**
-   * Phase: Pending, Allocated, Running, Terminated
+   * Standard Kubernetes conditions
    */
-  phase: string
+  conditions?: Array<{
+    type: string
+    status: 'True' | 'False' | 'Unknown'
+    reason: string
+    message: string
+    lastTransitionTime: string
+  }>
 
   /**
-   * Name of the allocated sandbox pod
+   * Reference to the created Sandbox
    */
-  podName?: string
+  sandbox?: {
+    Name: string
+  }
+}
+
+/**
+ * Sandbox status from Kubernetes (the actual workload)
+ */
+export interface SandboxResourceStatus {
+  /**
+   * Standard Kubernetes conditions
+   */
+  conditions?: Array<{
+    type: string
+    status: 'True' | 'False' | 'Unknown'
+    reason: string
+    message: string
+    lastTransitionTime: string
+  }>
 
   /**
-   * IP address of the pod
+   * Number of replicas
    */
-  podIP?: string
+  replicas: number
 
   /**
-   * Dapr app ID for service invocation
+   * Label selector for finding pods
    */
-  daprAppId?: string
+  selector?: string
 
   /**
-   * Error message if allocation failed
+   * Service name
    */
-  errorMessage?: string
+  service?: string
+
+  /**
+   * Full service FQDN
+   */
+  serviceFQDN?: string
+}
+
+/**
+ * Sandbox resource (the actual workload created by SandboxClaim)
+ */
+export interface SandboxResource {
+  apiVersion: string
+  kind: string
+  metadata: {
+    name: string
+    namespace: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+  }
+  spec: {
+    podTemplate: {
+      metadata?: {
+        labels?: Record<string, string>
+        annotations?: Record<string, string>
+      }
+      spec: unknown // PodSpec
+    }
+  }
+  status?: SandboxResourceStatus
 }
 
 /**
@@ -394,7 +428,7 @@ export interface K8sSandboxEnvConfig {
 
   /**
    * Dapr state store name for sandbox state
-   * Default: 'sandbox-statestore'
+   * Default: 'workflow-statestore'
    */
   SANDBOX_STATE_STORE: string
 
@@ -420,7 +454,7 @@ export function getEnvConfig(): K8sSandboxEnvConfig {
     SANDBOX_TEMPLATE: process.env.SANDBOX_TEMPLATE ?? 'vibe-coding-sandbox',
     SANDBOX_INGRESS_DOMAIN: process.env.SANDBOX_INGRESS_DOMAIN ?? 'sandbox.cnoe.localtest.me',
     SANDBOX_INGRESS_PORT: process.env.SANDBOX_INGRESS_PORT ?? '8443',
-    SANDBOX_STATE_STORE: process.env.SANDBOX_STATE_STORE ?? 'sandbox-statestore',
+    SANDBOX_STATE_STORE: process.env.SANDBOX_STATE_STORE ?? 'workflow-statestore',
     DAPR_HTTP_PORT: process.env.DAPR_HTTP_PORT ?? '3500',
     DAPR_HOST: process.env.DAPR_HOST ?? '127.0.0.1',
   }

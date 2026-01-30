@@ -1,0 +1,205 @@
+# DevSpace Configuration for Workflow Web
+# Enables Kubernetes-native development with hot-reload
+#
+# Architecture:
+#   - Replaces production container with devcontainer (full build tools)
+#   - Syncs local files to container in real-time
+#   - Runs Next.js dev server with hot module replacement
+#   - Integrates with existing OTEL observability stack
+#
+# Usage:
+#   devspace dev       # Start development mode
+#   devspace enter     # Shell into container
+#   devspace purge     # Clean up devspace resources
+
+version: v2beta1
+name: workflow-web
+
+# Development configuration
+dev:
+  app:
+    # Target the deployment by image selector (more reliable for workload identification)
+    namespace: workflow-web
+    imageSelector: gitea.cnoe.localtest.me:8443/giteaadmin/workflow-web
+    container: workflow-web
+
+    # Replace production image with devcontainer
+    devImage: gitea.cnoe.localtest.me:8443/giteaadmin/workflow-web-devspace:latest
+    workingDir: /app/apps/workflow-web
+
+    # Resource requirements for development
+    # Lower than vibe-coding-platform (no sandbox management, simpler app)
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+
+    # Command to run in the container
+    # Runs pnpm install (with caching), builds @workflow-worlds/dapr, then starts dev server
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "=== DevSpace Development Container ==="
+
+        # Always enable corepack and pnpm (required even if node_modules cached)
+        echo "Enabling corepack and pnpm..."
+        corepack enable
+        corepack prepare pnpm@9.13.0 --activate
+
+        # Move to workspace root for pnpm install
+        cd /app
+
+        echo "Checking dependencies..."
+        # Only install if node_modules is missing or package.json changed
+        if [ ! -d "node_modules" ] || [ ! -f "node_modules/.pnpm-lock-hash" ] || \
+           [ "$(cat node_modules/.pnpm-lock-hash 2>/dev/null)" != "$(md5sum pnpm-lock.yaml | cut -d' ' -f1)" ]; then
+          echo "Installing dependencies..."
+          pnpm install --frozen-lockfile
+          md5sum pnpm-lock.yaml | cut -d' ' -f1 > node_modules/.pnpm-lock-hash
+        else
+          echo "Dependencies up to date (cached)"
+        fi
+
+        # Build workspace packages (required for monorepo dependencies)
+        echo "Building workspace packages..."
+        if [ -d "/app/packages/workflow-worlds-dapr" ]; then
+          echo "Building @workflow-worlds/dapr..."
+          cd /app/packages/workflow-worlds-dapr
+          # Always rebuild to ensure latest changes
+          pnpm run build
+        fi
+
+        # Move to app directory
+        cd /app/apps/workflow-web
+
+        echo "Starting Next.js development server on port 3456..."
+        # Use pnpm to run next from the workspace (handles pnpm's node_modules structure)
+        exec pnpm exec next dev --turbo -p 3456
+
+    # File synchronization
+    # Sync only essential source code to container
+    # Uses persistPaths PVC for /app to ensure proper write permissions
+    sync:
+      - path: ../../:/app
+        initialSync: mirrorLocal
+        startContainer: true
+        waitInitialSync: true
+        onUpload:
+          restartContainer: false  # Hot-reload handles changes
+        excludePaths:
+          # === NEVER SYNC (large/binary/generated) ===
+          - node_modules/
+          - .pnpm-store/
+          - .next/
+          - dist/
+          - out/
+          - coverage/
+          - next-env.d.ts
+          # === DEV TOOLING (not needed in container) ===
+          - .devenv/
+          - .devspace/
+          - .direnv/
+          - .git
+          - .git/
+          - .github/
+          - .idea/
+          - .vscode/
+          - .cursor/
+          # === TEST FILES (not needed for dev server) ===
+          - tests/
+          - playwright-report/
+          - test-results/
+          - playwright.config.ts
+          - vitest.config.ts
+          # === DOCS (not needed at runtime) ===
+          - docs/
+          # Only exclude root-level markdown files (README, CHANGELOG, etc)
+          - README.md
+          - CHANGELOG.md
+          - CONTRIBUTING.md
+          - "*.log"
+          - LICENSE
+          - Dockerfile
+          - Dockerfile.devspace
+          - devenv.*
+          - devenv.lock
+          - .devenv*
+          - .devenv.flake.nix
+          - biome.jsonc
+          - .dockerignore
+          - .gitignore
+          - .env.local
+          - .env.example
+
+    # Persist /app workspace with proper permissions
+    # This creates a PVC and uses an init container to ensure correct ownership
+    # before sync starts. This is the recommended DevSpace approach for avoiding
+    # permission denied errors during file sync.
+    persistPaths:
+      - path: /app
+        # Don't copy existing container contents - we sync from local
+        skipPopulate: true
+
+    # PVC configuration for the workspace
+    persistenceOptions:
+      size: 10Gi
+      # Use default storage class (usually local-path or standard)
+      # storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+
+    # Patches to configure the pod for development
+    patches:
+      # Add Dapr health check annotations (ensures sidecar waits for app)
+      - op: add
+        path: spec.template.metadata.annotations.dapr\.io/enable-app-health-check
+        value: "true"
+      - op: add
+        path: spec.template.metadata.annotations.dapr\.io/app-health-check-path
+        value: "/api/health"
+      # Remove health checks (dev server startup is slower)
+      - op: remove
+        path: spec.containers.name=workflow-web.livenessProbe
+      - op: remove
+        path: spec.containers.name=workflow-web.readinessProbe
+      # Run workflow-web container as root for development to avoid permission issues
+      - op: replace
+        path: spec.containers.name=workflow-web.securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+      # Keep pod fsGroup for volume permissions
+      - op: replace
+        path: spec.securityContext
+        value:
+          fsGroup: 0
+          runAsNonRoot: false
+
+    # Port forwarding for development
+    # Use 3004 locally to avoid conflicts with vibe-coding-platform (3003)
+    ports:
+      - port: "3004:3456"  # Local 3004 -> Container 3456
+
+    # SSH access for debugging
+    ssh:
+      enabled: true
+      localPort: 2225  # Different from vibe-coding-platform (2224) to avoid conflicts
+
+    # Environment variables for development
+    # Only override values that DIFFER from the base Deployment in stacks repo
+    # Base deployment already sets: DAPR_ENABLED=true, OTEL_*, etc.
+    env:
+      - name: NODE_ENV
+        value: development
+      - name: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      # Increase Dapr sidecar wait time for dev (sidecar takes longer to initialize)
+      - name: DAPR_SIDECAR_WAIT_ATTEMPTS
+        value: "180"

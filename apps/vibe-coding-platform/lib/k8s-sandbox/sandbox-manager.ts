@@ -5,7 +5,10 @@
  * Provides an interface compatible with @vercel/sandbox.
  */
 
-import { nanoid } from 'nanoid'
+import { customAlphabet } from 'nanoid'
+
+// Custom nanoid with K8s-safe alphabet (lowercase alphanumeric only)
+const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)
 import { getK8sClient, K8sClient } from './k8s-client'
 import { getDaprClient, DaprClient } from './dapr-client'
 import {
@@ -30,7 +33,55 @@ const DEFAULT_CONFIG: Required<SandboxConfig> = {
 }
 
 /**
- * Command implementation
+ * Direct command implementation for kubectl exec results
+ * Used when sandbox pods don't have Dapr sidecars
+ */
+class K8sDirectCommand implements Command {
+  readonly cmdId: string
+  readonly startedAt: string
+  private result: { stdout: string; stderr: string; exitCode: number }
+
+  constructor(
+    cmdId: string,
+    startedAt: string,
+    result: { stdout: string; stderr: string; exitCode: number }
+  ) {
+    this.cmdId = cmdId
+    this.startedAt = startedAt
+    this.result = result
+  }
+
+  get exitCode(): number | null {
+    return this.result.exitCode
+  }
+
+  async stdout(): Promise<string> {
+    return this.result.stdout
+  }
+
+  async stderr(): Promise<string> {
+    return this.result.stderr
+  }
+
+  async *logs(): AsyncIterable<LogEntry> {
+    // For direct exec, we just yield stdout/stderr as single entries
+    const timestamp = new Date(this.startedAt).getTime()
+    if (this.result.stdout) {
+      yield { stream: 'stdout' as const, data: this.result.stdout, timestamp }
+    }
+    if (this.result.stderr) {
+      yield { stream: 'stderr' as const, data: this.result.stderr, timestamp }
+    }
+  }
+
+  async wait(): Promise<Command> {
+    // Direct exec is synchronous, so we're already done
+    return this
+  }
+}
+
+/**
+ * Command implementation for Dapr-based execution (legacy)
  */
 class K8sCommand implements Command {
   readonly cmdId: string
@@ -134,51 +185,47 @@ class K8sSandboxImpl implements K8sSandbox {
 
   /**
    * Read a file from the sandbox
+   * Uses direct kubectl exec when Dapr is disabled on sandbox pods
    */
   async readFile(path: string): Promise<AsyncIterable<Buffer> | null> {
-    const content = await this.daprClient.invokeReadFile(this.daprAppId, path)
+    // Use direct k8s exec - sandbox pods don't have Dapr sidecars
+    const content = await this.k8sClient.readFromPod(this.podName, path, 'sandbox')
 
     if (!content) {
       return null
     }
 
     // Return async iterable that yields the content as a single chunk
-    const buffer = Buffer.from(content, 'base64')
     return (async function* () {
-      yield buffer
+      yield content
     })()
   }
 
   /**
    * Write files to the sandbox
+   * Uses direct kubectl exec when Dapr is disabled on sandbox pods
    */
   async writeFiles(files: Array<{ path: string; content: Buffer }>): Promise<void> {
-    const encodedFiles = files.map((f) => ({
-      path: f.path,
-      content: f.content.toString('base64'),
-    }))
-
-    await this.daprClient.invokeWriteFiles(this.daprAppId, encodedFiles)
+    // Use direct k8s exec - sandbox pods don't have Dapr sidecars
+    await this.k8sClient.copyToPod(this.podName, files, 'sandbox')
   }
 
   /**
    * Run a command in the sandbox
+   * Uses direct kubectl exec when Dapr is disabled on sandbox pods
    */
   async runCommand(params: RunCommandParams): Promise<Command> {
-    const result = await this.daprClient.invokeExec(this.daprAppId, {
-      cmd: params.cmd,
-      args: params.args ?? [],
-      sudo: params.sudo,
-      detached: params.detached,
-    })
+    const cmdId = `cmd-${nanoid(8)}`
+    const startedAt = new Date().toISOString()
 
-    return new K8sCommand(
-      result.cmdId,
-      result.startedAt,
-      this.daprAppId,
-      this.sandboxId,
-      this.daprClient
-    )
+    // Build the command array
+    const command = [params.cmd, ...(params.args ?? [])]
+
+    // Use direct k8s exec - sandbox pods don't have Dapr sidecars
+    const result = await this.k8sClient.execInPod(this.podName, command, 'sandbox')
+
+    // Create a simple command wrapper that stores the result
+    return new K8sDirectCommand(cmdId, startedAt, result)
   }
 
   /**
@@ -254,22 +301,17 @@ export class SandboxManager {
     })
 
     // Wait for sandbox to be ready
-    const status = await this.k8sClient.waitForSandboxReady(sandboxId)
+    const readyResult = await this.k8sClient.waitForSandboxReady(sandboxId)
 
-    if (!status.podName || !status.podIP || !status.daprAppId) {
-      throw new SandboxError(
-        'Sandbox allocation incomplete',
-        'sandbox_creation_failed',
-        { status }
-      )
-    }
+    // Use serviceFQDN as daprAppId if available, otherwise derive from sandbox name
+    const daprAppId = readyResult.service ?? `sandbox-${sandboxId}`
 
     // Store sandbox state
     const state: SandboxState = {
       sandboxId,
-      podName: status.podName,
-      podIP: status.podIP,
-      daprAppId: status.daprAppId,
+      podName: readyResult.podName,
+      podIP: readyResult.podIP,
+      daprAppId,
       status: 'running',
       ports,
       createdAt: Date.now(),
@@ -292,7 +334,7 @@ export class SandboxManager {
     let state = await this.daprClient.getSandboxState(sandboxId)
 
     if (!state) {
-      // Try to get from K8s directly
+      // Try to get from K8s directly by checking SandboxClaim → Sandbox → Pod
       const claim = await this.k8sClient.getSandboxClaim(sandboxId)
 
       if (!claim) {
@@ -303,9 +345,31 @@ export class SandboxManager {
         )
       }
 
-      const claimStatus = claim.status
+      // Check if sandbox has been created
+      const sandboxName = claim.status?.sandbox?.Name
+      if (!sandboxName) {
+        throw new SandboxError(
+          `Sandbox ${sandboxId} is not ready (no sandbox created yet)`,
+          'sandbox_not_found',
+          { sandboxId }
+        )
+      }
 
-      if (claimStatus?.phase === 'Terminated') {
+      // Get the Sandbox resource
+      const sandbox = await this.k8sClient.getSandbox(sandboxName)
+      if (!sandbox) {
+        throw new SandboxError(
+          `Sandbox ${sandboxName} not found`,
+          'sandbox_not_found',
+          { sandboxId, sandboxName }
+        )
+      }
+
+      // Check for termination
+      const terminatedCondition = sandbox.status?.conditions?.find(
+        (c) => c.type === 'Ready' && c.status === 'False' && c.reason === 'Terminated'
+      )
+      if (terminatedCondition) {
         throw new SandboxError(
           `Sandbox ${sandboxId} has been stopped`,
           'sandbox_stopped',
@@ -313,24 +377,47 @@ export class SandboxManager {
         )
       }
 
-      if (!claimStatus?.podName || !claimStatus?.podIP || !claimStatus?.daprAppId) {
+      // Get pod info using selector
+      const selector = sandbox.status?.selector
+      if (!selector) {
         throw new SandboxError(
-          `Sandbox ${sandboxId} is not ready`,
+          `Sandbox ${sandboxId} is not ready (no pod selector)`,
           'sandbox_not_found',
-          { sandboxId, phase: claimStatus?.phase }
+          { sandboxId }
         )
       }
 
+      const pods = await this.k8sClient.findPodsBySelector(selector)
+      const runningPod = pods.find((p) => p.status?.phase === 'Running' && p.status?.podIP)
+
+      if (!runningPod) {
+        throw new SandboxError(
+          `Sandbox ${sandboxId} is not ready (pod not running)`,
+          'sandbox_not_found',
+          { sandboxId }
+        )
+      }
+
+      // Read ports and timeout from annotations
+      const annotations = claim.metadata.annotations ?? {}
+      const ports = annotations['sandbox.vibe-coding-platform/ports']
+        ? JSON.parse(annotations['sandbox.vibe-coding-platform/ports'])
+        : [3000]
+      const timeoutSeconds = annotations['sandbox.vibe-coding-platform/timeout-seconds']
+        ? parseInt(annotations['sandbox.vibe-coding-platform/timeout-seconds'], 10)
+        : 600
+
       // Reconstruct state
+      const daprAppId = sandbox.status?.service ?? `sandbox-${sandboxId}`
       state = {
         sandboxId,
-        podName: claimStatus.podName,
-        podIP: claimStatus.podIP,
-        daprAppId: claimStatus.daprAppId,
-        status: claimStatus.phase === 'Running' ? 'running' : 'pending',
-        ports: claim.spec.ports,
+        podName: runningPod.metadata?.name ?? '',
+        podIP: runningPod.status?.podIP ?? '',
+        daprAppId,
+        status: 'running',
+        ports,
         createdAt: Date.now(),
-        timeout: claim.spec.timeoutSeconds * 1000,
+        timeout: timeoutSeconds * 1000,
         namespace: claim.metadata.namespace,
       }
 
@@ -347,10 +434,10 @@ export class SandboxManager {
       )
     }
 
-    // Check pod health
-    const isHealthy = await this.daprClient.invokeHealthCheck(state.daprAppId)
+    // Check pod health via K8s API instead of Dapr (since Dapr may not be available)
+    const isPodRunning = await this.k8sClient.isPodRunning(state.podName)
 
-    if (!isHealthy) {
+    if (!isPodRunning) {
       // Update state to terminated
       state.status = 'terminated'
       await this.daprClient.saveSandboxState(sandboxId, state)
@@ -374,27 +461,46 @@ export class SandboxManager {
     const sandboxes: K8sSandbox[] = []
 
     for (const claim of claims) {
-      const status = claim.status
+      try {
+        // Check if sandbox reference exists
+        const sandboxName = claim.status?.sandbox?.Name
+        if (!sandboxName) continue
 
-      if (
-        status?.phase === 'Running' &&
-        status.podName &&
-        status.podIP &&
-        status.daprAppId
-      ) {
+        // Get the Sandbox resource
+        const sandbox = await this.k8sClient.getSandbox(sandboxName)
+        if (!sandbox?.status?.selector) continue
+
+        // Find running pod
+        const pods = await this.k8sClient.findPodsBySelector(sandbox.status.selector)
+        const runningPod = pods.find((p) => p.status?.phase === 'Running' && p.status?.podIP)
+        if (!runningPod) continue
+
+        // Read ports and timeout from annotations
+        const annotations = claim.metadata.annotations ?? {}
+        const ports = annotations['sandbox.vibe-coding-platform/ports']
+          ? JSON.parse(annotations['sandbox.vibe-coding-platform/ports'])
+          : [3000]
+        const timeoutSeconds = annotations['sandbox.vibe-coding-platform/timeout-seconds']
+          ? parseInt(annotations['sandbox.vibe-coding-platform/timeout-seconds'], 10)
+          : 600
+
+        const daprAppId = sandbox.status?.service ?? `sandbox-${claim.metadata.name}`
         const state: SandboxState = {
           sandboxId: claim.metadata.name,
-          podName: status.podName,
-          podIP: status.podIP,
-          daprAppId: status.daprAppId,
+          podName: runningPod.metadata?.name ?? '',
+          podIP: runningPod.status?.podIP ?? '',
+          daprAppId,
           status: 'running',
-          ports: claim.spec.ports,
+          ports,
           createdAt: Date.now(),
-          timeout: claim.spec.timeoutSeconds * 1000,
+          timeout: timeoutSeconds * 1000,
           namespace: claim.metadata.namespace,
         }
 
         sandboxes.push(new K8sSandboxImpl(state, this.daprClient, this.k8sClient))
+      } catch {
+        // Skip sandboxes that fail to load
+        continue
       }
     }
 
